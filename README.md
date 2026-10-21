@@ -2,239 +2,165 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-Scene-aware vertical auto-reframe CLI that turns horizontal footage into 9:16 video without losing the subject.
-
-> 🤖 **This project is built with AI.**
+Scene-aware CLI for reframing horizontal footage into 9:16 MP4 using subject selection and a smoothed virtual camera.
 
 ## Version 0.2.2
 
-- Fix TorchCodec initialization by removing the unsupported `output_dtype` argument.
-- Default to TorchCodec with logged OpenCV startup fallback; tensor mode switches to reference on fallback. Midstream errors remain fatal.
-- Python compatibility remains **3.13+**. After updating a checkout, reinstall with `python3 -m pip install --no-deps -e .` to refresh installed package metadata without changing accelerator dependencies.
+Removes TorchCodec's unsupported `output_dtype` initialization argument. See [decoder behavior](#video-decoding-and-processing) for defaults, startup fallback, and fatal errors.
 
----
+After updating a checkout, refresh installed package metadata without changing accelerator dependencies:
 
-## Highlights
-
-- **Cross-Scene Subject Tracking**: Seamlessly track people, pets, and vehicles through cuts with YOLO26 instance segmentation and ByteTrack.
-- **Multi-Cue Framing**: Integrates head cues, pose keypoints, and saliency maps with subject scoring and a smoothed camera path.
-- **Four Tuned Presets**: Built-in presets (`talking_head`, `sports`, `pets`, `cars`) with calibrated zoom and pan limits.
-- **Three-Tier Composition**: Pose-first composition (L1) → lightweight handcrafted saliency (L2) → on-demand DeepGaze MR (L3).
-- **Inference Region Restriction (`--precrop`)**: Accelerates high-resolution footage via middle, left, or right half-width inference while cropping from the full-resolution source.
-
----
-
-## Overview
-
-Vertical platforms (Reels, Shorts, TikTok) require 9:16 video, but most high-quality content is shot horizontally. Auto Vertical Reframe reads a video, detects subjects per scene, ranks candidates using multi-model signals, and drives a virtual camera (pan + zoom) through a smoothed path optimizer. It emits a ready-to-publish MP4 via FFmpeg.
-
-Naive center-cropping loses the subject the moment they move; manual reframing is tedious for long footage. Auto Vertical Reframe combines segmentation, pose/head cues, saliency, tracking continuity, and scene detection so each shot gets its own framing decision without relying on a static center crop.
-
----
+```bash
+python3 -m pip install --no-deps -e .
+```
 
 ## Features
 
-- **Per-Scene Subject Selection**: Uses PySceneDetect (`AdaptiveDetector`) for shot transitions, resets, and re-evaluation.
-- **YOLO26 Instance Segmentation**: Configurable target classes and detection confidence.
-- **Adaptive Segmentation Intervals**: Progressively skips YOLO calls using sparse optical-flow correction while preserving every source frame.
-- **YOLO26n-pose Keypoints**: 17 COCO keypoints with conservative head bounds estimation and batched person ROI inference.
-- **Two-Person Framing Mode**: Automatically widens composition when a secondary subject crosses a spatial threshold.
-- **Pose-First Three-Tier Composition**: Stable subjects compose directly from pose and segmentation masks; uncertain scenes escalate to DeepGaze MR.
-- **Lean On-Demand DeepGaze MR**: Loads only the feature extraction checkpoint (avoiding the 548 MB ImageNet VGG download) across a continuous 16-frame temporal window.
-- **Default TorchCodec Video Pipeline with Fallback**: Decodes sequentially via TorchCodec (NVDEC on CUDA) by default with transparent startup OpenCV fallback; supports end-to-end GPU Tensor image processing with explicit CPU fallback detection.
-- **Detailed Telemetry Diagnostics**: Reports tier decisions, real model invocations, cache ages, and hardware placement in the final Summary.
-- **Camera Motion Controls**: Subject lock, min/max zoom, max step-per-frame, per-axis damping, and dead zones.
-- **FFmpeg Encoding Control**: Custom video encoder (including `hevc_nvenc`), CRF, audio bitrate, and optional post-processing filters.
-- **Debug Preview Export**: Generates frame-by-frame visual diagnostic overlays.
-
-`auto_reframe.py` serves as a compatible CLI entry point. The core `reframe` package cleanly separates perception, saliency, composition, and video I/O; see [Architecture](#architecture).
-
----
-
-## Tech Stack
-
-- **Language:** Python 3.13+
-- **Object Detection & Tracking:** Ultralytics YOLO26, ByteTrack (`lap`)
-- **Pose & Head Cues:** YOLO26n-pose (`yolo26n-pose.pt`)
-- **Scene Detection:** PySceneDetect
-- **ML Runtime:** PyTorch 2.11+ (CUDA, CPU, MPS)
-- **Video Processing:** TorchCodec (NVDEC default, startup OpenCV fallback) and FFmpeg (CLI)
-
----
+- **Tracking:** YOLO26 segmentation and ByteTrack for people, pets, and vehicles; PySceneDetect re-evaluates subjects at cuts without guaranteed cross-cut identity.
+- **Framing:** YOLO26n-pose head/body cues, subject ranking/locking, two-person framing, and smoothed pan/zoom.
+- **Adaptive inference:** Optical-flow correction, pose-first composition, lightweight saliency, and on-demand DeepGaze MR; preserves every source frame.
+- **Presets:** `talking_head`, `sports`, `pets`, `cars`; configurable classes and camera limits.
+- **Video:** TorchCodec, optional GPU tensors, FFmpeg/NVENC encoding, audio preservation, debug overlays, and Summary telemetry.
 
 ## Quick Start
 
-Requires Python 3.13+ and system-installed `ffmpeg`. Install Python packages inside your environment:
+Requires **Python 3.13+** and system-installed `ffmpeg`. Python 3.12 and older are unsupported. Install inside a compatible environment:
 
 ```bash
 python3 -m pip install -e .
 auto_reframe.py input.mp4 output.mp4 --device auto
 ```
 
-`requirements.txt` pins Ultralytics and tracking dependencies. It uses a single OpenCV provider (`opencv-python`); installing headless/contrib packages alongside it can overwrite shared `cv2` bindings. PyTorch/TorchVision requires matching system CUDA builds.
+`python3 -m reframe` is an equivalent entry point. See [scenario commands](example.md); use `python3 -m reframe --help` for all options.
 
-Development targets **Python 3.13+** as the compatibility baseline (`requires-python >=3.13`). Python 3.12 and older are not supported (see [AGENTS.md](AGENTS.md)).
+`requirements.txt` pins Ultralytics and tracking dependencies. Keep a single OpenCV provider (`opencv-python`): headless/contrib distributions can overwrite the shared `cv2` bindings. PyTorch/TorchVision must match each other and the accelerator build. Python version alone does not establish CUDA wheel compatibility.
 
----
+### Colab installation
 
-### Video Decoding: Default TorchCodec with OpenCV Fallback
-
-The default video decoder is `torchcodec` (targeting `--decode-device cuda:0` with `--decode-batch-size 4`). TorchCodec requires a matching PyTorch / CUDA wheel (e.g. TorchCodec 0.17.0 cu130) and FFmpeg shared libraries. Note that the 2026-10-13 Google Colab Tesla T4 verification report (Python 3.13.15, PyTorch 2.11.0+cu130, TorchCodec 0.17.0+cu130, NVDEC hardware decoding verified with zero CPU fallback, HEVC NVENC encoding) represents historical baseline evidence for the opt-in implementation, not proof of the new default/fallback pipeline. The user reported Colab test success, but provided no new version logs or runtime evidence.
-
-#### Startup Fallback & Fault Tolerance
-
-1. **Startup Fallback**: If TorchCodec fails during import, initialization, or first batch validation (due to `ImportError`, `OSError`, `RuntimeError`, `TypeError`, or `AssertionError`), the pipeline logs a warning with full native exception traceback (`logging.warning(exc_info=True)`) and falls back transparently to OpenCV starting from frame 1.
-2. **Tensor Processing Downgrade**: If `--frame-processing tensor` is requested but TorchCodec startup fails, frame processing explicitly downgrades to `reference` (NumPy model/render path).
-3. **Explicit OpenCV Override**: To bypass TorchCodec probing entirely and decode directly via OpenCV, pass `--video-decoder opencv`.
-4. **Strict Fatal Failures**: Variable frame rate (VFR / `ValueError`) inputs and any midstream decode failures (occurring after startup validation) remain strictly fatal and never trigger fallback.
-5. **Telemetry & Summary Fields**: The final Summary `video_io` block records `requested_decoder`, `requested_frame_processing`, `decoder_fallback` (`bool`), and `decoder_fallback_reason` (`str` or `null`). The `decoder` and `frame_processing` fields report the actual executed pipeline. Native CUDA `cpu_fallback` status remains separate and unchanged.
-6. **Strict Hardware Validation**: Benchmark runners and collector scripts (`scripts/colab_torchcodec.py`, `scripts/youtube_validation.py`) enforce stricter assertions than routine production runs; they verify actual NVDEC placement (`nvdec_verified`) and reject silent fallback to CPU or OpenCV.
-
-```bash
-# Default (Stage 1): TorchCodec sequential decoding (defaults to --decode-device cuda:0), reference NumPy model/render path
-auto_reframe.py input.mp4 stage1.mp4 --device 0 --saliency-device cuda
-
-# Stage 2: Tensor preprocessing on GPU, DeepGaze small tensor window, GPU crop/resize
-auto_reframe.py input.mp4 stage2.mp4 --device 0 --saliency-device cuda \
-  --frame-processing tensor
-
-# Explicit OpenCV: Bypass TorchCodec probing directly
-auto_reframe.py input.mp4 baseline.mp4 --device 0 --video-decoder opencv
-```
-
-Both pipelines preserve audio synchronization and source frame counts; `precrop` only restricts the inference region. Stage 2 supports PyTorch `.pt` YOLO checkpoints and ByteTrack. Presentation timestamp validation differs across backends: TorchCodec explicitly validates sequential presentation timestamps and rejects non-CFR (variable frame rate / VFR) streams; OpenCV decodes using the container's reported FPS and cannot establish presentation timestamp validation.
-
-See [T4 Validation Specification](docs/t4-validation.md) and [AI Agent Handoff](docs/agent-handoff.md) for full execution guidelines. The latest hardware reports are available at [T4 GPU Verification Report](docs/reports/t4-2026-10-13-gpu-verified.md) and [YouTube 4K Portrait Validation Report](docs/reports/youtube-validation-2026-10-13-3079cd0d9549.md).
-
-Scheme B tracking profiles and pose caching are fully integrated; `--dead-zone` defaults to `0` across all presets.
----
-
-### Colab Environment Setup & Installation
-
-Run in a Google Colab terminal or code cell:
+From a Colab code cell, with the checkout at `/content/auto-vertical-reframe`:
 
 ```python
 !python3 -u /content/auto-vertical-reframe/install_colab.py
 ```
 
-The installer performs the following actions:
-1. Uninstalls legacy `mediapipe` and cleans cached weights.
-2. Removes overlapping OpenCV distributions and installs a single provider.
-3. Freezes current PyTorch / TorchVision versions (preserving `+cu130` tags).
-4. Verifies imports and CUDA status in a clean Python subprocess.
-5. Installs the `reframe` package in editable mode with the `auto_reframe.py` console script.
+The installer removes legacy `mediapipe` and cached weights, replaces overlapping OpenCV providers, preserves PyTorch/TorchVision versions (including CUDA tags), and installs editable. A fresh subprocess checks imports/CUDA; the installer does not select accelerator builds. Restart the kernel if affected packages were imported.
 
-If packages were already imported in the current session, restart the Colab kernel after installation.
+## Video Decoding and Processing
 
----
+Defaults: `--video-decoder torchcodec`, `--decode-device cuda:0`, `--decode-batch-size 4`, `--frame-processing reference`. TorchCodec needs a wheel matching PyTorch/CUDA and loadable FFmpeg shared libraries. CUDA decoding targets NVDEC; requesting CUDA is not proof of hardware placement.
 
-### YOLO26n-pose Framing Mechanism
+| Mode | Behavior |
+| :--- | :--- |
+| Default / stage1 | Sequential TorchCodec decoding; reference NumPy model/render path |
+| `--frame-processing tensor` / stage2 | GPU preprocessing, DeepGaze small tensor window, crop/resize; supports PyTorch `.pt` YOLO checkpoints and ByteTrack |
+| `--video-decoder opencv` / baseline | Bypasses TorchCodec probing and decodes directly with OpenCV |
 
-- `yolo26n-seg.pt` handles segmentation, ByteTrack IDs, and background objects.
-- `yolo26n-pose.pt` processes batches of person ROIs to produce 17 keypoints for head and torso cues.
-- Prioritizes the locked primary subject when tracking is stable; expands pose estimation during scene cuts or subject competition.
-- Head bounding boxes are estimated from high-confidence facial keypoints (nose, eyes, ears) rather than a separate face detector; falls back to person bounding boxes when keypoints are missing.
-- When the subject is turned or occluded, 3 geometrically sound shoulder/hip keypoints provide reliable torso evidence.
-- Corrupted model files or missing GPUs fail fast with full tracebacks.
+Both processing paths preserve source frame counts and audio synchronization. GPU and decoder commands are in [examples](example.md#decoder-and-processing-modes).
+
+### Fallback and failure boundaries
+
+- **Startup only:** TorchCodec import, initialization, or first-batch validation failures (`ImportError`, `OSError`, `RuntimeError`, `TypeError`, `AssertionError`) log a warning with the full native traceback and restart decoding from frame 1 using OpenCV.
+- **Tensor downgrade:** Startup fallback changes requested tensor processing to `reference` (NumPy models/rendering).
+- **Fatal:** VFR / `ValueError` and decode failures after first-batch validation stop processing; they do not trigger fallback or replay.
+- **Timestamp validation:** TorchCodec checks sequential presentation timestamps and rejects non-CFR streams. OpenCV uses the container-reported FPS and cannot establish per-frame timestamp validation.
+- **Hardware validation:** Collectors require verified NVDEC placement (`nvdec_verified`) and reject CPU or OpenCV fallback, unlike routine CLI runs.
+
+### Reading Summary diagnostics
+
+The `video_io` block separates intent from execution:
+
+| Fields | Meaning |
+| :--- | :--- |
+| `requested_decoder`, `requested_frame_processing` | Requested pipeline |
+| `decoder`, `frame_processing` | Actual pipeline after any startup fallback |
+| `decoder_fallback`, `decoder_fallback_reason` | Whether startup fallback occurred and why; reason is a string or `null` |
+| `cpu_fallback` | Separate native CUDA fallback diagnostic; not the OpenCV startup-fallback flag |
+
+Summary also reports tier decisions, actual neural forward calls, cache ages, and hardware placement. Keep stdout/stderr and native tracebacks visible; a successful output file alone does not establish GPU execution.
+
+## Pose and Subject Framing
+
+`yolo26n-seg.pt` supplies segmentation and ByteTrack observations. `yolo26n-pose.pt` processes person ROI batches into 17 COCO keypoints. Stable tracking prioritizes the locked subject; cuts or subject competition expand pose analysis.
+
+Head bounds come from confident nose/eye/ear keypoints, not a separate face detector; insufficient cues fall back to person bounds/masks. Turned or occluded people can use at least three reliable, geometrically sound shoulder/hip points spanning both regions. Model errors and unavailable explicitly requested model GPUs retain native tracebacks; decoder startup fallback is separate.
 
 | Option | Default / Purpose |
 | :--- | :--- |
-| `--pose-model` | `yolo26n-pose.pt`; accepts local COCO-17 person `.pt` checkpoints |
+| `--pose-model` | `yolo26n-pose.pt`; also accepts local COCO-17 person `.pt` checkpoints |
 | `--pose-imgsz` | `640`; positive multiple of 32 |
-| `--pose-conf` | `0.25`; detection confidence threshold for person boxes |
-| `--keypoint-conf` | `0.35`; minimum confidence threshold for individual keypoints |
-| `--pose-batch-size` | `4`; maximum person ROIs per inference batch |
-| `--cue-interval` | `0.2`s in balanced profile; soft update interval, deferred when stable |
-| `--pose-max-age` | `0.35`s in balanced profile; hard cache expiration; `0` disables reuse |
-| `--device` | `auto`; `0` enforces primary CUDA GPU, `cpu` forces CPU |
+| `--pose-conf` | `0.25`; pose person-box confidence |
+| `--keypoint-conf` | `0.35`; individual framing-keypoint confidence |
+| `--pose-batch-size` | `4`; maximum person ROIs per batch |
+| `--cue-interval` | Balanced: `0.2` seconds; soft refresh, deferred when stable |
+| `--pose-max-age` | Balanced: `0.35` seconds; hard cache expiry; `0` forbids cross-frame reuse |
+| `--device` | `auto`; `0` requests the first CUDA GPU, `cpu` forces CPU |
 
----
+## Adaptive Segmentation
 
-### Dynamic Segmentation & Optical Flow Correction
-
-Under `--tracking-profile balanced`, the YOLO segmentation interval progressively extends from **1 → 2 → 3 → 4 → 6 frames** as detections remain stable. Intervals exceeding 3 frames require compatible real poses and stable mask evidence. Intermediate frames are corrected via sparse KLT optical flow and motion extrapolation. Scene cuts, lost tracks, optical flow failures, or subject intersections trigger immediate re-detection.
+With `--tracking-profile balanced`, stable detections allow candidate intervals **1 → 2 → 3 → 4 → 6 frames**, subject to the real-measurement age limit. Intervals above 3 require compatible real poses and stable mask evidence. Sparse KLT optical flow and motion prediction correct intermediate frames; cuts, lost subjects, flow failure, or intersections prompt re-detection.
 
 | Option | Default / Purpose |
 | :--- | :--- |
-| `--tracking-profile` | `balanced`; options: `conservative`, `balanced`, `fast` |
-| `--seg-max-gap` | `6` for balanced/fast, `3` for conservative; `1` disables skipping for baseline comparison |
-| `--seg-max-age` | `0.1`s; maximum elapsed video time between real YOLO segmentations |
-| `--seg-thumbnail-mode` | `lazy` (builds thumbnails only when flow or scene checks require them) or `eager` |
-| `--seg-thumbnail-method` | `gray-area` (grayscale conversion before area resize, default) or `bgr-area` |
-| `--seg-skip-policy` | `primary` (deprioritizes distant, small secondary subjects) or `all` |
+| `--tracking-profile` | `balanced`; alternatives: `conservative`, `fast` |
+| `--seg-max-gap` | Balanced/fast: `6`; conservative: `3`; `1` disables segmentation skipping |
+| `--seg-max-age` | `0.1` seconds; maximum age of real segmentation |
+| `--seg-thumbnail-mode` | `lazy` builds thumbnails when needed; `eager` builds every adaptive frame |
+| `--seg-thumbnail-method` | `gray-area` converts to grayscale before area resize; `bgr-area` resizes BGR first |
+| `--seg-skip-policy` | `primary` lowers priority for distant low-risk secondary tracks; `all` requires all tracks settled |
 
----
+Gaps are ceilings, not guaranteed skips. At the default 0.1-second age limit, 30/60 FPS permit at most 3/6 frames; 29.97/59.94 FPS permit 2/5 (floor, without rounding FPS first). Explicit scheduling flags override profile defaults regardless of flag order. `--seg-max-gap 1` does not disable pose caching; use `--pose-max-age 0` for that.
 
-### Scheme C: Three-Tier Composition & On-Demand DeepGaze MR
+## Three-Tier Composition and DeepGaze MR
 
-Each frame determines its composition tier based on tracking stability, pose freshness, image motion, and saliency cache validity:
+Tracking stability, pose freshness, motion, and saliency-cache validity determine each frame's tier:
 
-| Tier | Decision & Processing Flow |
+| Tier | Processing |
 | :--- | :--- |
-| **L1 `pose_only`** | Primary subject is stable with reliable body keypoints; composes directly from pose and masks without running saliency models. |
-| **L2 `handcrafted`** | Partial pose cues or minor scene changes; uses low-resolution spectral residual and motion differentials. |
-| **L3 `deepgaze`** | High ambiguity, lost tracking, or non-human focus targets; invokes DeepGaze MR neural inference. |
+| L1 `pose_only` | Reliable fresh pose and masks compose a stable primary subject without saliency inference |
+| L2 `handcrafted` | Partial cues or mild changes use low-resolution spectral residual/motion differences; reliable cache may be reused |
+| L3 `deepgaze` | Ambiguous focus, lost tracking, or non-human targets can require neural saliency |
 
-Maintains a **16-frame circular ring buffer** of low-resolution frames in memory. DeepGaze is only loaded and executed when entering L3 with a complete 16-frame temporal window.
+A low-resolution ring buffer observes **16 consecutive source frames**, not 16 selected YOLO keyframes. DeepGaze loads and runs only when L3 needs it and the window is complete. Loading only feature weights avoids the 548 MB ImageNet VGG download; this is not a claim of faster steady-state forward passes. A stable clip may never load DeepGaze; L3 frames can reuse cache, so tier counts are not neural-call counts.
 
-| Option | Behavior |
+| Option | Default / Purpose |
 | :--- | :--- |
-| `--saliency-device` | `auto`; specify `cuda` on GPU runtimes |
-| `--saliency-max-side` | `384`; maximum long-edge dimension for saliency processing |
-| `--saliency-interval` | `3`; base refresh interval when saliency is required |
-| `--saliency-amp` | FP16 autocast enabled by default; use `--no-saliency-amp` for FP32 |
-| `--post-restore` | **Disabled by default** (bypasses FFmpeg unsharp and denoise filters) |
+| `--saliency-device` | `auto`; request `cuda` on a GPU runtime |
+| `--saliency-max-side` | `384`; saliency image long-edge limit |
+| `--saliency-interval` | `3`; base refresh interval when saliency is needed |
+| `--saliency-amp` | FP16 autocast on by default; `--no-saliency-amp` requests FP32 |
+| `--post-restore` | Off by default; opt in to FFmpeg denoising and sharpening |
 
----
+## `--precrop`: Inference Region
 
-### `--precrop`: Inference Region Restriction
+All choices retain full height. Omit the flag for full-frame inference:
 
-Retains full height and takes half the width (~50% pixel area) to accelerate high-resolution footage:
-
-| Option | Horizontal Span | Inference Window for 3840×2160 Source |
+| Choice | Horizontal span | x range for 3840×2160 input |
 | :--- | :--- | :--- |
-| Omitted | 0%–100% | x=0–3840, height 2160 (Full Frame) |
-| `--precrop left` | 0%–50% | x=0–1920, height 2160 |
-| `--precrop middle` | 25%–75% | x=960–2880, height 2160 |
-| `--precrop right` | 50%–100% | x=1920–3840, height 2160 |
+| Omitted | 0%–100% | 0–3840 |
+| `left` | 0%–50% | 0–1920 |
+| `middle` | 25%–75% | 960–2880 |
+| `right` | 50%–100% | 1920–3840 |
 
-Output video is always cropped from the full-resolution source; crop windows can pan beyond the inference region.
+Detection, pose, and saliency stay inside the chosen region; the program does not search outside it if the subject leaves. Output crops the full-resolution source and can extend beyond that region. Half-width inference does not guarantee half the compute because model input resizing still applies.
 
----
+## Camera and Output Controls
 
-### Testing & Documentation Index
+Use `--lock-first-subject` for the initial tracked subject, `--fixed-zoom` to disable dynamic zoom, and `--pan-time` for pan response. `--dead-zone` is a fraction of crop width/height and defaults to `0` for every preset; zoom dead zone is independent. Subject lock does not guarantee identity recovery after cuts or long occlusion. See the [fixed-zoom example](example.md#fixed-zoom-and-initial-subject) for a less reactive camera.
 
-- [AI Agent Handoff](docs/agent-handoff.md): Architectural decisions, implementation status, and continuation guidelines.
-- [T4 Validation Specification](docs/t4-validation.md): GPU validation criteria, commands, and verification gates.
-- [T4 GPU Verification Report (2026-10-13)](docs/reports/t4-2026-10-13-gpu-verified.md): Complete end-to-end telemetry and measurements on a physical Tesla T4 GPU.
-- [YouTube 4K Portrait Validation Report (2026-10-13)](docs/reports/youtube-validation-2026-10-13-3079cd0d9549.md): 4K source screening, human calibration gate approval, and batch processing results.
+`--video-encoder`, `--crf`, and `--audio-bitrate` control encoding. Debug previews use `--save-debug-preview` and `--debug-path`; `--max-frames` bounds a diagnostic run. Avoid claiming speedups from fewer output frames, reduced precision, or missed subjects.
 
-Dedicated runners:
-- 4K Portrait Runner: [`scripts/youtube_validation.py`](scripts/youtube_validation.py), [`notebooks/colab-youtube-validation.ipynb`](notebooks/colab-youtube-validation.ipynb)
-- Staged T4 Collector: [`scripts/colab_torchcodec.py`](scripts/colab_torchcodec.py), [`notebooks/colab-torchcodec.ipynb`](notebooks/colab-torchcodec.ipynb)
+## Validation and Further Documentation
 
----
+The 2026-10-13 T4 and 4K reports below describe the historical opt-in implementation, **not proof of the current default/fallback pipeline**. The user reported Colab success without new version logs. CPU passes, CUDA skips, and zero real model calls do not establish current GPU validation.
 
-## Architecture
+- [Agent handoff](docs/agent-handoff.md): architecture decisions, implementation status, code/test entry points, and continuation steps.
+- [T4 validation specification](docs/t4-validation.md): hardware criteria, commands, and comparison gates.
+- [T4 GPU report, 2026-10-13](docs/reports/t4-2026-10-13-gpu-verified.md): historical NVDEC/NVENC and inference evidence.
+- [YouTube 4K report, 2026-10-13](docs/reports/youtube-validation-2026-10-13-3079cd0d9549.md): source screening, human calibration, and batch results.
 
-| Module | Responsibility |
-| :--- | :--- |
-| `reframe/cli.py`, `config.py` | Early diagnostics before heavy imports; typed `AppConfig` parsing, defaults, and validation |
-| `contracts.py`, `geometry.py`, `precrop.py` | Data contracts, spatial geometry, and inference-to-source coordinate mapping |
-| `perception/segmentation.py`, `motion.py`, `pose.py` | Adaptive segmentation, KLT optical flow, mask summaries, batched pose inference, and cue caching |
-| `saliency/base.py`, `factory.py`, `backends/` | Backend lifecycle management (`load`, `observe`, `predict`, `reset`, `close`, `telemetry`) |
-| `saliency/cascade.py`, `cache.py`, `regions.py` | Pose-driven tier routing, ring buffer observation, static cache reuse, EMA, and saliency regions |
-| `subjects.py`, `camera.py` | Candidate enrichment/ranking, subject locking, smoothed camera path optimization |
-| `scenes.py`, `video_io.py`, `debug.py`, `runtime.py` | Scene cut detection, FFmpeg subprocess management, visual debug overlays, and runtime telemetry |
-| `pipeline.py` | Resource ownership and single-pass streaming orchestration |
+Runners and notebooks: [T4 collector](scripts/colab_torchcodec.py) / [Colab](notebooks/colab-torchcodec.ipynb); [4K runner](scripts/youtube_validation.py) / [Colab](notebooks/colab-youtube-validation.ipynb). Collector dataflow `--profiles` and CLI scheduling `--tracking-profile` are separate controls.
 
-Every frame proceeds through: Segmentation observation/prediction → Priority pose update → Three-tier saliency routing → Candidate ranking → Camera composition → Frame encoding. Ranking consumes observations and never invokes models directly.
-
----
-
-### Local Regression Checks
-
-Run after dependency installation:
+After installing dependencies, local regressions cover geometry, pose freshness, temporal ingestion, fallback, scene resets, and FFmpeg pipes:
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -242,33 +168,6 @@ python3 -m unittest test_security test_security_reframe -v
 python3 -c 'import test_torch_load; test_torch_load.test_torch_load_weights_only()'
 ```
 
-Tests cover geometry alignment, keypoint freshness, temporal ring ingestion, backend fallbacks, scene cut resets, and FFmpeg pipe handling.
+## Origin and License
 
----
-
-## Fixed-Camera Example (Tripod Mode)
-
-To produce reframed vertical video that behaves like a **fixed camera mounted on a tripod**—locking onto the opening subject without digital zoom pumping:
-
-```bash
-python auto_reframe.py input.mp4 output_fixed.mp4 \
-    --preset talking_head \
-    --lock-first-subject \
-    --fixed-zoom 1.10 \
-    --dead-zone 0.08 \
-    --pan-time 0.55
-```
-
-### Key Parameter Effects:
-1. **`--lock-first-subject`**: Locks the initial detected primary subject's `track_id`. The camera will not switch subjects even if passersby enter the background or talk nearby.
-2. **`--fixed-zoom 1.10`**: Locks the virtual camera magnification at $1.10\times$, completely disabling dynamic digital zoom to eliminate "zoom pumping" when subjects lean forward or gesture.
-3. **`--dead-zone 0.08`**: Defines an 8% dead zone for crop width and height. Minor subject movements within this boundary do not pan the camera.
-4. **`--pan-time 0.55`**: When the subject exits the dead zone, smoothly pans to re-center with gentle ease-in-out spring damping, avoiding sudden camera jerks.
-
----
-
-## Status & License
-
-- **AI Development**: This project is built and maintained with AI.
-- **Origin**: This implementation is derived from [KazKozDev/auto-vertical-reframe](https://github.com/KazKozDev/auto-vertical-reframe).
-- **License**: Licensed under the MIT License — see [LICENSE](LICENSE).
+Built and maintained with AI. Derived from [KazKozDev/auto-vertical-reframe](https://github.com/KazKozDev/auto-vertical-reframe). [MIT License](LICENSE).

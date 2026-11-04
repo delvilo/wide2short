@@ -78,7 +78,7 @@ class TorchCodecReaderTests(unittest.TestCase):
         self.assertEqual(list(reader), [])
 
     def test_variable_fps_and_discontinuous_pts_rejected(self):
-        for offset in (-.01, .01, float("nan")):
+        for offset in (-.02, .02, float("nan")):
             with self.subTest(offset=offset):
                 decoder = SyntheticDecoder()
                 decoder.pts_offsets[2] = offset

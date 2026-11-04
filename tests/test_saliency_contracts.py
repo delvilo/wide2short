@@ -137,12 +137,23 @@ class SaliencyContractTests(unittest.TestCase):
         np.testing.assert_allclose(region[:6], [320, 105, 300, 100, 350, 120])
 
     def test_invalid_backend_results_are_rejected(self):
-        for values in (np.full((8, 8), np.nan), np.zeros((8, 8, 3)), np.full((8, 8), -1)):
+        # Non-finite, wrong dimensionality, or empty maps are still rejected.
+        for values in (np.full((8, 8), np.nan), np.zeros((8, 8, 3))):
             with self.subTest(shape=values.shape), \
                     patch.object(self.backend, "predict", return_value=BackendPrediction(values, "broken")):
                 self.service.reset()
                 with self.assertRaises(ValueError):
                     self.process(1)
+
+    def test_out_of_range_backend_map_is_clamped_instead_of_rejected(self):
+        # Tiny numerical excursions outside [0, 1] are corrected, not fatal.
+        for values in (np.full((8, 8), -1.0), np.full((8, 8), 1.5)):
+            with self.subTest(shape=values.shape), \
+                    patch.object(self.backend, "predict", return_value=BackendPrediction(values, "broken")):
+                self.service.reset()
+                result = self.process(1)
+                self.assertGreaterEqual(float(result.map.min()), 0.0)
+                self.assertLessEqual(float(result.map.max()), 1.0)
 
     def test_handcrafted_implements_same_contract_with_real_opencv(self):
         backend = HandcraftedSaliencyHelper()

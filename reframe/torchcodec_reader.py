@@ -142,10 +142,16 @@ class TorchCodecReader:
         timestamps = batch.pts_seconds.tolist()
         if len(timestamps) != expected_count:
             raise RuntimeError("TorchCodec returned an incomplete timestamp batch")
+        # Container timestamps can carry small rounding and time-base conversion
+        # drift versus metadata average_fps.  Tolerance is 10% of the frame interval
+        # with a 10 ms floor, which accepts near-CFR content whose container FPS label
+        # differs slightly from the decoded PTS grid, while still rejecting genuinely
+        # variable-frame-rate or discontinuous streams.
+        tolerance = max(0.01, 0.1 / self.fps)
         for offset, actual in enumerate(timestamps):
             index = self._next_index + offset
             expected = self._start_seconds + index / self.fps
-            if not math.isfinite(actual) or abs(actual - expected) > .001:
+            if not math.isfinite(actual) or abs(actual - expected) > tolerance:
                 raise ValueError(
                     "Variable-frame-rate or discontinuous timestamps are not supported by "
                     f"the constant-FPS writer (frame {index + 1}: PTS {actual}, "

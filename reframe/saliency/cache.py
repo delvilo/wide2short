@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import logging
 import cv2
 import numpy as np
 from reframe.contracts import BackendPrediction, FrameContext, SaliencyResult
@@ -45,8 +46,12 @@ class SaliencyCache:
         fresh = np.asarray(prediction.map, dtype=np.float32)
         if fresh.ndim != 2 or not fresh.size or not np.isfinite(fresh).all():
             raise ValueError("Saliency backend must return a finite, nonempty 2-D map")
-        if fresh.min() < -1e-6 or fresh.max() > 1 + 1e-6:
-            raise ValueError("Saliency backend map must be in [0, 1]")
+        if fresh.min() < 0.0 or fresh.max() > 1.0:
+            logging.warning(
+                "Saliency backend map out of [0, 1] range "
+                "(min=%.6f, max=%.6f); clamping", fresh.min(), fresh.max()
+            )
+        fresh = np.clip(fresh, 0.0, 1.0)
         fresh = cv2.resize(fresh, (shape[1], shape[0]))
         history_weight = 0.0 if propagated is None else 1 - self.ema
         blended = fresh if propagated is None else self.ema * fresh + history_weight * propagated

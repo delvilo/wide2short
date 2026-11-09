@@ -84,6 +84,11 @@ class TorchCodecReader:
         self.height = int(metadata.height or 0)
         self.total_frames = int(metadata.num_frames or 0)
         self._start_seconds = float(metadata.begin_stream_seconds or 0)
+        # Offset (in frames) between the container PTS grid and the CFR grid,
+        # accumulated when container PTS slots are missing (e.g. one slot absent
+        # shifts every subsequent PTS by one frame duration).
+        self._pts_offset = 0
+        self._gap_count = 0
         if (
             not math.isfinite(self.fps) or self.fps <= 0
             or self.width <= 0 or self.height <= 0 or self.total_frames <= 0
@@ -156,13 +161,31 @@ class TorchCodecReader:
         tolerance = 0.001
         for offset, actual in enumerate(timestamps):
             index = self._next_index + offset
-            expected = self._start_seconds + index / self.fps
+            expected = self._start_seconds + (index + self._pts_offset) / self.fps
             if not math.isfinite(actual) or abs(actual - expected) > tolerance:
-                raise ValueError(
-                    "Variable-frame-rate or discontinuous timestamps are not supported by "
-                    f"the constant-FPS writer (frame {index + 1}: PTS {actual}, "
-                    f"expected {expected:.9f} at {self.fps:g} FPS)"
-                )
+                # Container may drop a PTS slot (e.g. one frame's timestamp
+                # missing), shifting every subsequent PTS by a frame duration.
+                # Accept small gaps and carry the offset forward so the CFR
+                # output keeps its duration.
+                frame_duration = 1.0 / self.fps
+                gap_k = None
+                for k in range(1, 5):
+                    expected_with_gap = self._start_seconds + (
+                        index + self._pts_offset + k
+                    ) / self.fps
+                    if abs(actual - expected_with_gap) <= tolerance:
+                        gap_k = k
+                        break
+                if gap_k is not None:
+                    self._pts_offset += gap_k
+                    self._gap_count += gap_k
+                    expected = expected_with_gap
+                else:
+                    raise ValueError(
+                        "Variable-frame-rate or discontinuous timestamps are not supported by "
+                        f"the constant-FPS writer (frame {index + 1}: PTS {actual}, "
+                        f"expected {expected:.9f} at {self.fps:g} FPS)"
+                    )
 
     def telemetry(self) -> dict[str, Any]:
         """Return JSON-serializable measurements, available after close()."""
@@ -183,8 +206,9 @@ class TorchCodecReader:
             "metadata_fps": self._metadata_fps,
             "timestamp_tolerance_seconds": 0.001,
             "fps_source": self._fps_source,
+            "pts_offset_frames": self._pts_offset,
+            "gap_count": self._gap_count,
             "width": self.width, "height": self.height,
-            "pixels": dict(self.pixel_metrics),
         }
         if self._actual_device is not None and self._actual_device.startswith("cuda"):
             import torch

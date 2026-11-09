@@ -6,9 +6,9 @@ timestamps are rejected rather than silently changing playback speed.
 """
 from __future__ import annotations
 
+import logging
 import math
 from importlib.metadata import version
-from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -167,7 +167,10 @@ class TorchCodecReader:
                 # missing), shifting every subsequent PTS by a frame duration.
                 # Accept small gaps and carry the offset forward so the CFR
                 # output keeps its duration.
-                frame_duration = 1.0 / self.fps
+                # Container may drop a PTS slot (e.g. one frame's timestamp
+                # missing), shifting every subsequent PTS by a frame duration.
+                # Accept small gaps and carry the offset forward; repeated gaps
+                # beyond the cap indicate a genuine VFR problem.
                 gap_k = None
                 for k in range(1, 5):
                     expected_with_gap = self._start_seconds + (
@@ -177,6 +180,17 @@ class TorchCodecReader:
                         gap_k = k
                         break
                 if gap_k is not None:
+                    if self._gap_count + gap_k > 10:
+                        raise ValueError(
+                            "Variable-frame-rate or discontinuous timestamps are not supported by "
+                            f"the constant-FPS writer (frame {index + 1}: PTS {actual}, "
+                            f"expected {expected:.9f} at {self.fps:g} FPS)"
+                        )
+                    logging.warning(
+                        "Container dropped %d PTS slot(s) near frame %d; "
+                        "carrying offset forward so CFR output keeps its duration.",
+                        gap_k, index + 1,
+                    )
                     self._pts_offset += gap_k
                     self._gap_count += gap_k
                     expected = expected_with_gap
@@ -205,10 +219,12 @@ class TorchCodecReader:
             "source_frames": self.total_frames, "source_fps": self.fps,
             "metadata_fps": self._metadata_fps,
             "timestamp_tolerance_seconds": 0.001,
-            "fps_source": self._fps_source,
-            "pts_offset_frames": self._pts_offset,
             "gap_count": self._gap_count,
-            "width": self.width, "height": self.height,
+            "fps_source": self._fps_source,
+            "width": self.width,
+            "pts_offset_frames": self._pts_offset,
+            "height": self.height,
+            "pixels": dict(self.pixel_metrics),
         }
         if self._actual_device is not None and self._actual_device.startswith("cuda"):
             import torch

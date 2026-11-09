@@ -26,7 +26,7 @@ class FallbackStatus:
 
 
 class SyntheticDecoder:
-    def __init__(self, count=11, fps=30., start=2.5, pts_fps=None):
+    def __init__(self, count=11, fps=30., start=2.5, pts_fps=None, skip_slot_at=None):
         self.metadata = SimpleNamespace(
             average_fps=fps,
             average_fps_from_header=fps,
@@ -34,6 +34,7 @@ class SyntheticDecoder:
             begin_stream_seconds=start,
         )
         self.pts_fps = pts_fps if pts_fps is not None else fps
+        self.skip_slot_at = skip_slot_at
         self.cpu_fallback = FallbackStatus()
         self.calls = []
         self.pts_offsets = {}
@@ -41,8 +42,12 @@ class SyntheticDecoder:
     def get_frames_in_range(self, start, stop):
         self.calls.append((start, stop))
         data = torch.arange(start, stop, dtype=torch.uint8)[:, None, None, None].expand(-1, 3, 24, 32)
-        pts = [self.metadata.begin_stream_seconds + i / self.pts_fps
-               + self.pts_offsets.get(i, 0) for i in range(start, stop)]
+        pts = []
+        for i in range(start, stop):
+            pts_sec = self.metadata.begin_stream_seconds + i / self.pts_fps
+            if self.skip_slot_at is not None and i >= self.skip_slot_at:
+                pts_sec += 1.0 / self.pts_fps  # Missing PTS slot shifts by one frame
+            pts.append(pts_sec + self.pts_offsets.get(i, 0))
         return SimpleNamespace(data=data, pts_seconds=torch.tensor(pts, dtype=torch.float64))
 
 
@@ -110,6 +115,34 @@ class TorchCodecReaderTests(unittest.TestCase):
         self.assertEqual(reader.telemetry()["fps_source"], "header")
         self.assertEqual(reader.telemetry()["source_fps"], 60.0)
         self.assertEqual(reader.telemetry()["metadata_fps"], 59.99369549227698)
+    def test_missing_pts_slot_mid_stream_accepted(self):
+        # Container drops one PTS slot at frame 5; all subsequent PTS shift by
+        # one frame duration. Reader must accept all frames and carry offset.
+        decoder = SyntheticDecoder(count=20, fps=30.0, skip_slot_at=5)
+        reader, _ = self.open_reader(decoder, batch_size=4)
+        frames = list(reader)
+        self.assertEqual(len(frames), 20)
+        tel = reader.telemetry()
+        self.assertEqual(tel["gap_count"], 1)
+        self.assertEqual(tel["pts_offset_frames"], 1)
+
+    def test_missing_pts_slot_near_end_accepted(self):
+        # Missing slot near end of stream.
+        decoder = SyntheticDecoder(count=20, fps=30.0, skip_slot_at=18)
+        reader, _ = self.open_reader(decoder, batch_size=4)
+        frames = list(reader)
+        self.assertEqual(len(frames), 20)
+        tel = reader.telemetry()
+        self.assertEqual(tel["gap_count"], 1)
+        self.assertEqual(tel["pts_offset_frames"], 1)
+
+    def test_too_many_consecutive_gaps_rejected(self):
+        # Five missing PTS slots in a row exceed the accepted gap window.
+        decoder = SyntheticDecoder(count=20, fps=30.0, skip_slot_at=5)
+        decoder.pts_offsets = {i: 1.0 / 30.0 for i in range(5, 10)}
+        reader, _ = self.open_reader(decoder, batch_size=4)
+        with self.assertRaisesRegex(ValueError, "Variable-frame-rate"):
+            list(reader)
 
     def test_cuda_fallback_or_unknown_status_rejected_before_cpu_tensor_is_used(self):
         for status in (FallbackStatus(fallback=True), FallbackStatus(known=False)):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 from importlib.metadata import version
+from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -165,10 +166,6 @@ class TorchCodecReader:
             if not math.isfinite(actual) or abs(actual - expected) > tolerance:
                 # Container may drop a PTS slot (e.g. one frame's timestamp
                 # missing), shifting every subsequent PTS by a frame duration.
-                # Accept small gaps and carry the offset forward so the CFR
-                # output keeps its duration.
-                # Container may drop a PTS slot (e.g. one frame's timestamp
-                # missing), shifting every subsequent PTS by a frame duration.
                 # Accept small gaps and carry the offset forward; repeated gaps
                 # beyond the cap indicate a genuine VFR problem.
                 gap_k = None
@@ -188,8 +185,8 @@ class TorchCodecReader:
                         )
                     logging.warning(
                         "Container dropped %d PTS slot(s) near frame %d; "
-                        "carrying offset forward so CFR output keeps its duration.",
-                        gap_k, index + 1,
+                        "subsequent frames shift earlier by %d frame durations.",
+                        gap_k, index + 1, gap_k,
                     )
                     self._pts_offset += gap_k
                     self._gap_count += gap_k

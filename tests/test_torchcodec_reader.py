@@ -137,9 +137,17 @@ class TorchCodecReaderTests(unittest.TestCase):
         self.assertEqual(tel["pts_offset_frames"], 1)
 
     def test_too_many_consecutive_gaps_rejected(self):
-        # Five missing PTS slots in a row exceed the accepted gap window.
-        decoder = SyntheticDecoder(count=20, fps=30.0, skip_slot_at=5)
-        decoder.pts_offsets = {i: 1.0 / 30.0 for i in range(5, 10)}
+        # Eleven missing PTS slots exceed the total gap cap of 10.
+        decoder = SyntheticDecoder(count=20, fps=30.0)
+        decoder.pts_offsets = {i: 1.0 / 30.0 for i in range(11)}
+        reader, _ = self.open_reader(decoder, batch_size=4)
+        with self.assertRaisesRegex(ValueError, "Variable-frame-rate"):
+            list(reader)
+
+    def test_single_large_gap_rejected(self):
+        # Single gap of 5 slots exceeds per-gap cap of 4.
+        decoder = SyntheticDecoder(count=20, fps=30.0)
+        decoder.pts_offsets = {5: 5.0 / 30.0}
         reader, _ = self.open_reader(decoder, batch_size=4)
         with self.assertRaisesRegex(ValueError, "Variable-frame-rate"):
             list(reader)

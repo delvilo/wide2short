@@ -14,6 +14,20 @@ class SaliencyCache:
             raise ValueError("Saliency EMA must be in (0, 1]")
         self.ema = ema
         self.reset()
+        self._clamp_count = 0
+        self._clamp_min = 1.0
+        self._clamp_max = 0.0
+
+    def reset(self) -> None:
+        self.previous_gray: np.ndarray | None = None
+        self.result: SaliencyResult | None = None
+
+    def telemetry(self) -> dict[str, Any]:
+        return {
+            "saliency_clamp_count": self._clamp_count,
+            "saliency_clamp_min": self._clamp_min,
+            "saliency_clamp_max": self._clamp_max,
+        }
 
     def reset(self) -> None:
         self.previous_gray: np.ndarray | None = None
@@ -46,11 +60,18 @@ class SaliencyCache:
         fresh = np.asarray(prediction.map, dtype=np.float32)
         if fresh.ndim != 2 or not fresh.size or not np.isfinite(fresh).all():
             raise ValueError("Saliency backend must return a finite, nonempty 2-D map")
-        if fresh.min() < 0.0 or fresh.max() > 1.0:
-            logging.warning(
-                "Saliency backend map out of [0, 1] range "
-                "(min=%.6f, max=%.6f); clamping", fresh.min(), fresh.max()
-            )
+        fresh_min = float(fresh.min())
+        fresh_max = float(fresh.max())
+        if fresh_min < 0.0 or fresh_max > 1.0:
+            if fresh_min < -1e-6 or fresh_max > 1 + 1e-6:
+                if self._clamp_count == 0:
+                    logging.warning(
+                        "Saliency backend map out of [0, 1] range "
+                        "(min=%.6f, max=%.6f); clamping", fresh_min, fresh_max,
+                    )
+                self._clamp_count += 1
+                self._clamp_min = min(self._clamp_min, fresh_min)
+                self._clamp_max = max(self._clamp_max, fresh_max)
         fresh = np.clip(fresh, 0.0, 1.0)
         fresh = cv2.resize(fresh, (shape[1], shape[0]))
         history_weight = 0.0 if propagated is None else 1 - self.ema

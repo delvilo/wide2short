@@ -26,11 +26,14 @@ class FallbackStatus:
 
 
 class SyntheticDecoder:
-    def __init__(self, count=11, fps=30., start=2.5):
+    def __init__(self, count=11, fps=30., start=2.5, pts_fps=None):
         self.metadata = SimpleNamespace(
-            average_fps=fps, width=32, height=24, num_frames=count,
+            average_fps=fps,
+            average_fps_from_header=fps,
+            width=32, height=24, num_frames=count,
             begin_stream_seconds=start,
         )
+        self.pts_fps = pts_fps if pts_fps is not None else fps
         self.cpu_fallback = FallbackStatus()
         self.calls = []
         self.pts_offsets = {}
@@ -38,7 +41,7 @@ class SyntheticDecoder:
     def get_frames_in_range(self, start, stop):
         self.calls.append((start, stop))
         data = torch.arange(start, stop, dtype=torch.uint8)[:, None, None, None].expand(-1, 3, 24, 32)
-        pts = [self.metadata.begin_stream_seconds + i / self.metadata.average_fps
+        pts = [self.metadata.begin_stream_seconds + i / self.pts_fps
                + self.pts_offsets.get(i, 0) for i in range(start, stop)]
         return SimpleNamespace(data=data, pts_seconds=torch.tensor(pts, dtype=torch.float64))
 
@@ -78,7 +81,7 @@ class TorchCodecReaderTests(unittest.TestCase):
         self.assertEqual(list(reader), [])
 
     def test_variable_fps_and_discontinuous_pts_rejected(self):
-        for offset in (-.02, .02, float("nan")):
+        for offset in (-.01, .01, float("nan")):
             with self.subTest(offset=offset):
                 decoder = SyntheticDecoder()
                 decoder.pts_offsets[2] = offset
@@ -91,6 +94,22 @@ class TorchCodecReaderTests(unittest.TestCase):
         decoder.pts_offsets = {i: .0004 * (-1) ** i for i in range(11)}
         reader, _ = self.open_reader(decoder)
         self.assertEqual(len(list(reader)), 11)
+
+    def test_header_rate_overrides_content_rate_for_pts_grid(self):
+        # Container content-scanned rate (59.9937) differs from header rate (60).
+        # PTS are on the 60 Hz grid; reader must use header rate and accept all frames.
+        decoder = SyntheticDecoder(
+            count=9516, fps=59.99369549227698, pts_fps=60.0, start=0.0
+        )
+        decoder.metadata.average_fps_from_header = 60.0
+        decoder.pts_offsets = {}
+        reader, _ = self.open_reader(decoder)
+        frames = list(reader)
+        self.assertEqual(len(frames), 9516)
+        self.assertEqual(reader.fps, 60.0)
+        self.assertEqual(reader.telemetry()["fps_source"], "header")
+        self.assertEqual(reader.telemetry()["source_fps"], 60.0)
+        self.assertEqual(reader.telemetry()["metadata_fps"], 59.99369549227698)
 
     def test_cuda_fallback_or_unknown_status_rejected_before_cpu_tensor_is_used(self):
         for status in (FallbackStatus(fallback=True), FallbackStatus(known=False)):
@@ -128,6 +147,9 @@ class TorchCodecReaderTests(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 decoder = SyntheticDecoder()
                 setattr(decoder.metadata, field, value)
+                if field == "average_fps":
+                    # The header rate is the reference grid; both sources must be invalid.
+                    decoder.metadata.average_fps_from_header = value
                 with self.assertRaisesRegex(ValueError, "invalid video"):
                     self.open_reader(decoder)
 

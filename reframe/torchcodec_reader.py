@@ -73,7 +73,13 @@ class TorchCodecReader:
         # TorchCodec's content-scanned average_fps (e.g. 59.9937) can drift from
         # the actual PTS grid and is kept only for telemetry comparison.
         self._metadata_fps = float(metadata.average_fps or 0)
-        self.fps = float(getattr(metadata, 'average_fps_from_header', None) or self._metadata_fps or 0)
+        header_fps = getattr(metadata, 'average_fps_from_header', None)
+        if header_fps:
+            self.fps = float(header_fps)
+            self._fps_source = "header"
+        else:
+            self.fps = self._metadata_fps
+            self._fps_source = "content"
         self.width = int(metadata.width or 0)
         self.height = int(metadata.height or 0)
         self.total_frames = int(metadata.num_frames or 0)
@@ -85,7 +91,6 @@ class TorchCodecReader:
         ):
             self.close()
             raise ValueError("TorchCodec returned invalid video dimensions, frame count, FPS or start timestamp")
-
     def __iter__(self):
         return self
 
@@ -176,6 +181,8 @@ class TorchCodecReader:
             "max_batch_frames": self._max_batch,
             "source_frames": self.total_frames, "source_fps": self.fps,
             "metadata_fps": self._metadata_fps,
+            "timestamp_tolerance_seconds": 0.001,
+            "fps_source": self._fps_source,
             "width": self.width, "height": self.height,
             "pixels": dict(self.pixel_metrics),
         }

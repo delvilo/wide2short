@@ -69,7 +69,11 @@ class TorchCodecReader:
         self._initialization_seconds = perf_counter() - started
         self._version = version("torchcodec")
         metadata = self._decoder.metadata
-        self.fps = float(metadata.average_fps or 0)
+        # Use the container header rate (e.g. 60.0) as the PTS grid reference.
+        # TorchCodec's content-scanned average_fps (e.g. 59.9937) can drift from
+        # the actual PTS grid and is kept only for telemetry comparison.
+        self._metadata_fps = float(metadata.average_fps or 0)
+        self.fps = float(getattr(metadata, 'average_fps_from_header', None) or self._metadata_fps or 0)
         self.width = int(metadata.width or 0)
         self.height = int(metadata.height or 0)
         self.total_frames = int(metadata.num_frames or 0)
@@ -142,12 +146,9 @@ class TorchCodecReader:
         timestamps = batch.pts_seconds.tolist()
         if len(timestamps) != expected_count:
             raise RuntimeError("TorchCodec returned an incomplete timestamp batch")
-        # Container timestamps can carry small rounding and time-base conversion
-        # drift versus metadata average_fps.  Tolerance is 10% of the frame interval
-        # with a 10 ms floor, which accepts near-CFR content whose container FPS label
-        # differs slightly from the decoded PTS grid, while still rejecting genuinely
-        # variable-frame-rate or discontinuous streams.
-        tolerance = max(0.01, 0.1 / self.fps)
+        # Strict tolerance on actual PTS grid: rejects VFR / discontinuous streams
+        # while accepting minor container rounding.
+        tolerance = 0.001
         for offset, actual in enumerate(timestamps):
             index = self._next_index + offset
             expected = self._start_seconds + index / self.fps
@@ -174,8 +175,8 @@ class TorchCodecReader:
             "batches": self._batches, "batch_size": self.batch_size,
             "max_batch_frames": self._max_batch,
             "source_frames": self.total_frames, "source_fps": self.fps,
+            "metadata_fps": self._metadata_fps,
             "width": self.width, "height": self.height,
-            "timestamp_tolerance_seconds": .001,
             "pixels": dict(self.pixel_metrics),
         }
         if self._actual_device is not None and self._actual_device.startswith("cuda"):
